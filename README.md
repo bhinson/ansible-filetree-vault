@@ -1,4 +1,3 @@
-# ansible-filetree-vault
 Extract credentials from data exported using filetree_create
 
 usage: ansible-playbook extract-creds-to-vault.yml -e '{ target_dir: /path/to/filetree/output }'
