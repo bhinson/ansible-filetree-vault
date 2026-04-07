@@ -1,0 +1,80 @@
+---
+- name: Extract credentials and generate remote vault file
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # Directory to scan; defaults to current directory if not provided
+    target_dir: "{{ target_dir | default('.') }}"
+    vault_filename: "remotevault.yml"
+
+  tasks:
+    - name: Ensure the target directory exists
+      ansible.builtin.stat:
+        path: "{{ target_dir }}"
+      register: dir_stat
+
+    - name: Fail if target directory does not exist
+      ansible.builtin.fail:
+        msg: "The directory '{{ target_dir }}' does not exist."
+      when: not dir_stat.stat.exists or not dir_stat.stat.isdir
+
+    - name: Find all files in the target directory
+      ansible.builtin.find:
+        paths: "{{ target_dir }}"
+        file_type: file
+        recurse: yes
+      register: found_files
+
+    - name: Read contents of found files
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      loop: "{{ found_files.files }}"
+      register: file_contents
+      no_log: true # Keeps file contents (which might contain sensitive data) out of console logs
+
+    - name: Extract lines matching the script's grep logic
+      ansible.builtin.set_fact:
+        # This replicates the bash script's function by pulling the values 
+        # from lines matching username:, password:, ssh_key_data:, and ssh_key_unlock:
+        extracted_lines: >-
+          {{
+            extracted_lines | default([]) +
+            (item['content'] | b64decode | regex_findall('^\s*(?:username|password|ssh_key_data|ssh_key_unlock)\s*:\s*(.*)$', multiline=True))
+          }}
+      loop: "{{ file_contents.results }}"
+      no_log: true
+
+    - name: Extract Ansible Vault variable names from the captured lines
+      ansible.builtin.set_fact:
+        # Isolates variable names like 'vaulted_...' from the extracted lines.
+        # This correctly handles lines that might contain multiple {{ vaulted_... }} entries
+        ansible_vars: >-
+          {{
+            ansible_vars | default([]) +
+            (item | regex_findall('vaulted_[A-Za-z0-9_]+'))
+          }}
+      loop: "{{ extracted_lines | default([]) }}"
+      no_log: true
+
+    - name: Deduplicate and sort variable names
+      ansible.builtin.set_fact:
+        unique_vars: "{{ ansible_vars | default([]) | unique | sort }}"
+
+    - name: Write variables out to the Ansible vault format file
+      ansible.builtin.copy:
+        dest: "{{ vault_filename }}"
+        content: |
+          {% for var_name in unique_vars %}
+          {{ var_name }}: "insert-secret-password-here"
+          {% endfor %}
+      when: unique_vars | length > 0
+
+    - name: Alert user if no variables were found
+      ansible.builtin.debug:
+        msg: "No vault variables were found in the directory: {{ target_dir }}"
+      when: unique_vars | length == 0
+
+    - name: Display success summary
+      ansible.builtin.debug:
+        msg: "Successfully extracted {{ unique_vars | length }} unique variables to {{ vault_filename }}."
+      when: unique_vars | length > 0
